@@ -28,10 +28,12 @@ use_gpu = torch.cuda.is_available()
 model = DeepHistone(use_gpu)
 print('Begin training model...')
 best_model = copy.deepcopy(model)
+print("made deep copy of model")
 best_valid_auPRC=0
-best_valid_loss = np.float('Inf')
+best_valid_loss = np.float64('inf')
 for epoch in range(50):
 	np.random.shuffle(train_index)
+	print("Using device:", next(model.parameters()).device)
 	train_loss= model_train(train_index,model,batchsize,dna_dict,dns_dict,lab_dict,)
 	valid_loss,valid_lab,valid_pred= model_eval(valid_index, model,batchsize,dna_dict,dns_dict,lab_dict,)
 	valid_auPRC,valid_auROC= metrics(valid_lab,valid_pred,'Valid',valid_loss)

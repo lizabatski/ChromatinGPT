@@ -1,0 +1,30 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+chromatingpt/
+.venv/
+env/
+venv/
+
+# Large datasets and genome files
+data/
+data_preprocessing/
+raw/
+*.npz
+*.fa
+*.fai
+*.gz
+*.sizes.txt
+
+# Logs
+logs/
+*.out
+*.err
+
+# Model checkpoints and weights
+*.h5
+*.pt
+*.ckpt
+model/
