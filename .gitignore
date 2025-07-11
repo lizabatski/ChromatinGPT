@@ -10,7 +10,6 @@ venv/
 
 # Large datasets and genome files
 data/
-data_preprocessing/
 raw/
 *.npz
 *.fa
