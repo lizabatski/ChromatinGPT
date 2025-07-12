@@ -16,11 +16,25 @@ def inspect_npz(file_path, num_examples=3):
     print(f"\nContents of {file_path}:")
     print("=" * 50)
 
+    zero_vector_count = None  # Initialize for labels
+    total_labels = None
+
     for key in data.files:
         array = data[key]
         print(f"Key: {key}")
         print(f"  Shape: {array.shape}")
         print(f"  Dtype: {array.dtype}")
+
+        # Count all-zero vectors if this is labels
+        if key.lower() in ['label', 'labels']:
+            total_labels = array.shape[0]
+            # A label is all-zero if sum across axis=1 is 0
+            squeezed_array = np.squeeze(array)
+            if squeezed_array.ndim == 2:
+                zero_vector_count = np.sum(np.all(squeezed_array == 0, axis=1))
+                print(f"  ⚠️ Zero-only labels count: {zero_vector_count}/{total_labels}")
+            else:
+                print("  ⚠️ Labels are not 2D after squeezing—skipping zero vector check.")
 
         # Print first few examples
         print(f"  First {num_examples} example(s):")
@@ -35,6 +49,8 @@ def inspect_npz(file_path, num_examples=3):
         print("-" * 50)
 
     print("Inspection complete.")
+    if zero_vector_count is not None:
+        print(f"\n✅ Total zero-only label vectors: {zero_vector_count}/{total_labels}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
