@@ -14,4 +14,4 @@
 source ~/ChromatinGPT/DeepHistone/chromatingpt/bin/activate
 
 # Run training script
-python train_deephistone.py --data_file data/E005_large.npz --seed 42
+python ../train_deephistone.py --data_file data/E005_large.npz --seed 42

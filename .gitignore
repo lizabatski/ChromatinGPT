@@ -30,3 +30,6 @@ model/
 
 # Ignore results directory
 results/
+
+# Ignore large model files
+*.pth
