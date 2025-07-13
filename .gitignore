@@ -27,3 +27,6 @@ logs/
 *.pt
 *.ckpt
 model/
+
+# Ignore results directory
+results/

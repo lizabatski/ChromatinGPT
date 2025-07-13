@@ -2,15 +2,23 @@ from sklearn.metrics import auc,roc_auc_score,precision_recall_curve
 import numpy as np
 histones=['H3K4me1','H3K4me3','H3K27me3','H3K36me3','H3K9me3','H3K9ac','H3K27ac']
 
-def loadRegions(regions_indexs,dna_dict,dns_dict,label_dict,):
-	if dna_dict is not None:
-		dna_regions = np.concatenate([dna_dict[meta]  for meta in regions_indexs],axis=0)
-	else: dna_regions =[]
-	if dns_dict is not None:
-		dns_regions = np.concatenate([dns_dict[meta] for meta in regions_indexs],axis=0)
-	else: dns_regions =[]
-	label_regions = np.concatenate([label_dict[meta] for meta in regions_indexs],axis=0).astype(int)
-	return dna_regions,dns_regions,label_regions
+def loadRegions(regions_indexs, dna_dict, dns_dict, label_dict):
+    if dna_dict is not None:
+        dna_regions = np.concatenate(
+            [dna_dict[meta] for meta in regions_indexs], axis=0
+        ).copy()
+    else:
+        dna_regions = []
+    if dns_dict is not None:
+        dns_regions = np.concatenate(
+            [dns_dict[meta] for meta in regions_indexs], axis=0
+        ).copy()
+    else:
+        dns_regions = []
+    label_regions = np.concatenate(
+        [label_dict[meta] for meta in regions_indexs], axis=0
+    ).astype(int).copy()
+    return dna_regions, dns_regions, label_regions
  	
 def model_train(regions,model,batchsize,dna_dict,dns_dict,label_dict,):
 	train_loss = []
