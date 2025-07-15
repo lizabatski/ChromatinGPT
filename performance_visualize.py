@@ -15,10 +15,18 @@ def plot_training_curves(results_dir, vis_dir):
             continue
 
         data = np.load(history_file, allow_pickle=True)
-        train_loss = data['train_loss']
-        valid_loss = data['valid_loss']
-        valid_auPRC = data['valid_auPRC']
-        valid_auROC = data['valid_auROC']
+        
+        if args.enformer:
+            history = data['history'].item() 
+            train_loss = history['train_loss']
+            valid_loss = history['valid_loss']
+            valid_auPRC = history['valid_auPRC']
+            valid_auROC = history['valid_auROC']
+        else:
+            train_loss = data['train_loss']
+            valid_loss = data['valid_loss']
+            valid_auPRC = data['valid_auPRC']
+            valid_auROC = data['valid_auROC']
 
         plt.figure(figsize=(12, 6))
         plt.subplot(1, 2, 1)
@@ -210,5 +218,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--results_dir", required=True, help="Path to results folder (e.g., results/E005_deephistone_chr22_<run_id>)")
+    parser.add_argument("--enformer", action="store_true",
+                    help="Set this flag if visualizing Enformer results (default: DeepHistone)")
     args = parser.parse_args()
     run_all(args.results_dir)

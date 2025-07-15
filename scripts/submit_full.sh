@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=deephistone_full          
 #SBATCH --account=def-majewski               
-#SBATCH --time=08:00:00                      
+#SBATCH --time=24:00:00                      
 #SBATCH --cpus-per-task=12                   
 #SBATCH --mem=128G                          
 #SBATCH --gres=gpu:1                         
@@ -16,4 +16,4 @@ source ~/ChromatinGPT/DeepHistone/chromatingpt/bin/activate
 cd ~/ChromatinGPT/DeepHistone
 
 # Run training script
-python train.py --data_file data/E005_deephistone.npz --seed 42
+python train_5fold.py --data_file data/E005_deephistone.npz --seed 42
