@@ -356,7 +356,8 @@ class NetDeepHistoneEnformer(nn.Module):
                  num_heads: int = 8,
                  dropout: float = 0.4,
                  num_histones: int = 7,
-                 pooling_type: str = 'attention'): 
+                 pooling_type: str = 'attention', 
+                 num_conv_blocks: int = 2): 
         super(NetDeepHistoneEnformer, self).__init__()
         
         print(f'DeepHistone-Enformer Hybrid (1kb) initialized')
@@ -366,6 +367,7 @@ class NetDeepHistoneEnformer(nn.Module):
         self.num_transformer_layers = num_transformer_layers
         self.num_heads = num_heads
         self.pooling_type = pooling_type
+        self.num_conv_blocks = num_conv_blocks
 
         stem_out_channels = channels // 2
         #print(f"[DEBUG INIT] Target stem_out_channels: {stem_out_channels}")
@@ -377,7 +379,7 @@ class NetDeepHistoneEnformer(nn.Module):
         #print(f"[DEBUG INIT] Actual stem output channels: {actual_stem_out}")
         
         # convolutional tower (exponentially increasing channels)
-        self.conv_tower = self._build_conv_tower(actual_stem_out, channels, pooling_type, num_blocks=2) #choosing 2 blocks for my 1000 bp sequence for now
+        self.conv_tower = self._build_conv_tower(actual_stem_out, channels, pooling_type, num_blocks=self.num_conv_blocks) #making this easily configurable
         
         # transformer encoder
         self.transformer = nn.ModuleList([
@@ -536,7 +538,8 @@ class DeepHistoneEnformer:
                  num_heads: int = 8,
                  dropout: float = 0.4,
                  num_histones: int = 7,
-                 pooling_type: str = 'attention'):
+                 pooling_type: str = 'attention',
+                 num_conv_blocks: int = 2):
         
         #instance of enformer
         self.forward_fn = NetDeepHistoneEnformer(
@@ -546,7 +549,8 @@ class DeepHistoneEnformer:
             num_heads=num_heads,
             dropout=dropout,
             num_histones=num_histones,
-            pooling_type=pooling_type
+            pooling_type=pooling_type,
+            num_conv_blocks=num_conv_blocks
         )
         
         #loss function and adam optimizer

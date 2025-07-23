@@ -1,7 +1,7 @@
 from mini_dhica import DeepHistoneEnformer
 import copy
 import numpy as np
-from utils_enformer_1kb import (metrics, model_train, model_eval, model_predict)
+from utils_dhica import (metrics, model_train, model_eval, model_predict, histones)
 import torch
 import os
 from datetime import datetime
@@ -11,7 +11,7 @@ import sys
 import json
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DeepHistone-Enformer Training Script")
+    parser = argparse.ArgumentParser(description="DeepHistone-Enformer Dual-Pathway Training Script")
     
     # data arguments
     parser.add_argument('--data_file', type=str, required=True,
@@ -20,10 +20,10 @@ def parse_args():
                         help='Random seed (default: 42)')
     
     # model arguments
-    parser.add_argument('--channels', type=int, default=1536,
-                        help='Number of channels in the model (default: 1536)')
-    parser.add_argument('--num_transformer_layers', type=int, default=11,
-                        help='Number of transformer layers (default: 11)')
+    parser.add_argument('--channels', type=int, default=768,
+                        help='Number of channels in the model (default: 768)')
+    parser.add_argument('--num_transformer_layers', type=int, default=4,
+                        help='Number of transformer layers (default: 4)')
     parser.add_argument('--num_heads', type=int, default=8,
                         help='Number of attention heads (default: 8)')
     parser.add_argument('--dropout', type=float, default=0.4,
@@ -31,44 +31,41 @@ def parse_args():
     parser.add_argument('--pooling_type', type=str, default='attention',
                         choices=['attention', 'max'],
                         help='Pooling type (default: attention)')
+    parser.add_argument('--fusion_type', type=str, default='concat',
+                        choices=['concat', 'cross_attention', 'gated'],
+                        help='Fusion type for combining DNA and DNase (default: concat)')
     
     # training arguments
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size (default: 16)')
     parser.add_argument('--learning_rate', type=float, default=0.001,
-                        help='Learning rate (default: 0.0001)')
+                        help='Learning rate (default: 0.001)')
     parser.add_argument('--max_epochs', type=int, default=50,
                         help='Maximum number of epochs (default: 50)')
     parser.add_argument('--early_stopping_patience', type=int, default=5,
                         help='Early stopping patience (default: 5)')
     
     parser.add_argument('--num_conv_blocks', type=int, default=2,
-                    help='Number of convolutional blocks in the conv tower (default: 2)')
+                        help='Number of convolutional blocks in the conv tower (default: 2)')
 
-
-    
-    
     return parser.parse_args()
 
 def setup_logging(output_dir: str):
     """Setup logging configuration"""
     log_file = os.path.join(output_dir, 'training.log')
     
-    
     import logging
-    logger = logging.getLogger('enformer_training')
+    logger = logging.getLogger('dual_pathway_training')
+    logger.handlers.clear()  # Clear any existing handlers
     logger.setLevel(logging.INFO)
-    
     
     file_handler = logging.FileHandler(log_file)
     console_handler = logging.StreamHandler(sys.stdout)
     
-   
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
     
-   
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     
@@ -91,7 +88,6 @@ def load_data(data_file: str):
             print(f"Creating dictionaries for {len(indexs)} samples...")
             print("WARNING: Loading entire dataset into memory. This may take a while for large datasets...")
             sys.stdout.flush()
-            
             
             dna_dict = dict(zip(f['keys'], f['dna']))
             print("DNA dictionary created")
@@ -121,7 +117,6 @@ def create_folds(indexs: np.ndarray, n_folds: int = 5):
     fold_size = len(indexs) // n_folds
     folds = [indexs[i*fold_size:(i+1)*fold_size] for i in range(n_folds)]
     
-
     if len(indexs) % n_folds != 0:
         folds[-1] = np.concatenate([folds[-1], indexs[n_folds*fold_size:]])
     
@@ -134,7 +129,6 @@ def train_fold(fold_idx: int,
                data_dicts: dict,
                output_dir: str,
                logger):
-
     
     fold_output_dir = os.path.join(output_dir, f'fold_{fold_idx+1}')
     os.makedirs(fold_output_dir, exist_ok=True)
@@ -157,15 +151,19 @@ def train_fold(fold_idx: int,
     logger.info(f"  Test samples: {len(test_index)}")
     sys.stdout.flush()
     
-    # initialize model
+    # initialize model with dual-pathway configuration
+    logger.info("Initializing dual-pathway model...")
     model = DeepHistoneEnformer(
         use_gpu=torch.cuda.is_available(),
         learning_rate=training_config['learning_rate'],
         **model_config
     )
-    print(f"Using device: {'cuda' if torch.cuda.is_available() else 'cpu'}")  # ADD THIS
-    sys.stdout.flush() 
     
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"Using device: {device}")
+    if torch.cuda.is_available():
+        logger.info(f"CUDA device: {torch.cuda.get_device_name()}")
+    sys.stdout.flush() 
     
     history = {
         'train_loss': [],
@@ -181,6 +179,7 @@ def train_fold(fold_idx: int,
     best_model_path = os.path.join(fold_output_dir, 'best_model.pth')
     
     # training loop
+    logger.info("Starting training loop...")
     for epoch in range(training_config['max_epochs']):
         epoch_start = datetime.now()
         np.random.shuffle(train_index)
@@ -217,9 +216,13 @@ def train_fold(fold_idx: int,
         
         # save best model
         if mean_auPRC > best_valid_auPRC:
-            torch.save(model.forward_fn.state_dict(), best_model_path)
+            # Make a temporary path in /tmp
+            tmp_best_model_path = os.path.join("/tmp", f"best_model_fold_{fold_idx}.pth")
+
+            # Save to /tmp instead of home directory
+            torch.save(model.forward_fn.state_dict(), tmp_best_model_path)
             best_valid_auPRC = mean_auPRC
-            logger.info(f"    New best model saved! auPRC: {best_valid_auPRC:.4f}")
+            logger.info(f"    New best model saved to /tmp/! auPRC: {best_valid_auPRC:.4f}")
         
         # early stopping logic
         if valid_loss < best_valid_loss:
@@ -242,9 +245,9 @@ def train_fold(fold_idx: int,
         sys.stdout.flush()
     
     # load best model for testing
-    if os.path.exists(best_model_path):
-        model.forward_fn.load_state_dict(torch.load(best_model_path))
-        logger.info("Best model loaded for testing")
+    if os.path.exists(tmp_best_model_path):
+        model.forward_fn.load_state_dict(torch.load(tmp_best_model_path, map_location=device))
+        logger.info("Best model loaded from /tmp/ for testing")
     
     # test evaluation
     logger.info("Evaluating on test set...")
@@ -270,7 +273,7 @@ def train_fold(fold_idx: int,
     
     # save results
     results_file = os.path.join(fold_output_dir, 'training_history.npz')
-    np.savez(results_file, **fold_results)
+    np.savez_compressed(results_file, **fold_results)
     
     # save predictions and labels as text files
     np.savetxt(os.path.join(fold_output_dir, 'test_labels.txt'), test_lab, fmt='%d', delimiter='\t')
@@ -315,16 +318,15 @@ def aggregate_results(output_dir: str, logger):
     if all_auPRCs and all_auROCs:
         # calculate overall statistics
         final_results = {
-            'mean_auPRC': np.mean(all_auPRCs),
-            'std_auPRC': np.std(all_auPRCs),
-            'mean_auROC': np.mean(all_auROCs),
-            'std_auROC': np.std(all_auROCs),
-            'fold_auPRCs': all_auPRCs,
-            'fold_auROCs': all_auROCs
+            'mean_auPRC': float(np.mean(all_auPRCs)),
+            'std_auPRC': float(np.std(all_auPRCs)),
+            'mean_auROC': float(np.mean(all_auROCs)),
+            'std_auROC': float(np.std(all_auROCs)),
+            'fold_auPRCs': [float(x) for x in all_auPRCs],
+            'fold_auROCs': [float(x) for x in all_auROCs]
         }
         
         # calculate per-histone statistics
-        from utils_enformer_1kb import histones
         per_histone_results = {}
         
         for histone in histones:
@@ -341,10 +343,10 @@ def aggregate_results(output_dir: str, logger):
                     histone_auROCs.append(test_auROC[histone])
             
             per_histone_results[histone] = {
-                'mean_auPRC': np.mean(histone_auPRCs) if histone_auPRCs else 0,
-                'std_auPRC': np.std(histone_auPRCs) if histone_auPRCs else 0,
-                'mean_auROC': np.mean(histone_auROCs) if histone_auROCs else 0,
-                'std_auROC': np.std(histone_auROCs) if histone_auROCs else 0
+                'mean_auPRC': float(np.mean(histone_auPRCs)) if histone_auPRCs else 0.0,
+                'std_auPRC': float(np.std(histone_auPRCs)) if histone_auPRCs else 0.0,
+                'mean_auROC': float(np.mean(histone_auROCs)) if histone_auROCs else 0.0,
+                'std_auROC': float(np.std(histone_auROCs)) if histone_auROCs else 0.0
             }
         
         final_results['per_histone'] = per_histone_results
@@ -356,7 +358,7 @@ def aggregate_results(output_dir: str, logger):
         
         # print final results
         logger.info("=" * 60)
-        logger.info("5-FOLD CROSS-VALIDATION RESULTS")
+        logger.info("5-FOLD CROSS-VALIDATION RESULTS - DUAL-PATHWAY MODEL")
         logger.info("=" * 60)
         logger.info(f"Mean auPRC: {final_results['mean_auPRC']:.4f} ± {final_results['std_auPRC']:.4f}")
         logger.info(f"Mean auROC: {final_results['mean_auROC']:.4f} ± {final_results['std_auROC']:.4f}")
@@ -374,25 +376,30 @@ def aggregate_results(output_dir: str, logger):
         logger.error("No valid results found")
         return None
 
-
 def main():
     args = parse_args()
     
     # setup
     print("=" * 60)
-    print("DEEPHISTONE-ENFORMER TRAINING STARTED")
+    print("DUAL-PATHWAY DEEPHISTONE-ENFORMER TRAINING")
     print("=" * 60)
     print(f"PyTorch version: {torch.__version__}")
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"CUDA device: {torch.cuda.get_device_name()}")
+        print(f"CUDA version: {torch.version.cuda}")
+    print(f"Model configuration:")
+    print(f"  Channels: {args.channels}")
+    print(f"  Transformer layers: {args.num_transformer_layers}")
+    print(f"  Fusion type: {args.fusion_type}")
+    print(f"  Histones: {len(histones)} ({', '.join(histones)})")
     sys.stdout.flush()
-    
     
     if not os.path.exists(args.data_file):
         print(f"Error: Data file not found: {args.data_file}")
         sys.exit(1)
     
+    # Set seeds for reproducibility
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -405,9 +412,8 @@ def main():
     # create output directory
     dataset_name = os.path.splitext(os.path.basename(args.data_file))[0]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     
-    config_suffix = f"c{args.channels}_l{args.num_transformer_layers}_h{args.num_heads}"
+    config_suffix = f"c{args.channels}_l{args.num_transformer_layers}_h{args.num_heads}_{args.fusion_type}"
 
     slurm_id = os.environ.get("SLURM_ARRAY_TASK_ID", None)
     if slurm_id:
@@ -415,11 +421,11 @@ def main():
     else:
         job_suffix = ""
 
-    output_dir = f"results/{dataset_name}_enformer_{config_suffix}_{timestamp}{job_suffix}"
+    output_dir = f"results/{dataset_name}_dual_pathway_{config_suffix}_{timestamp}{job_suffix}"
 
     if os.path.exists(output_dir):
         raise RuntimeError(f"Output directory {output_dir} already exists. Aborting to prevent overwrite.")
-    os.makedirs(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
     
     # setup logging
     logger = setup_logging(output_dir)
@@ -432,7 +438,9 @@ def main():
             'num_heads': args.num_heads,
             'dropout': args.dropout,
             'pooling_type': args.pooling_type,
-            'num_conv_blocks': args.num_conv_blocks
+            'num_conv_blocks': args.num_conv_blocks,
+            'fusion_type': args.fusion_type,
+            'num_histones': len(histones)
         },
         'training_config': {
             'batch_size': args.batch_size,
@@ -440,8 +448,16 @@ def main():
             'max_epochs': args.max_epochs,
             'early_stopping_patience': args.early_stopping_patience
         },
-        'data_file': args.data_file,
-        'seed': args.seed,
+        'data_config': {
+            'data_file': args.data_file,
+            'histones': histones
+        },
+        'experiment_info': {
+            'seed': args.seed,
+            'architecture': 'dual_pathway',
+            'fusion_type': args.fusion_type,
+            'timestamp': timestamp
+        }
     }
     
     config_file = os.path.join(output_dir, 'config.json')
@@ -470,21 +486,37 @@ def main():
     all_fold_results = []
     
     for fold_idx in range(5):
+        fold_start_time = datetime.now()
         fold_results = train_fold(
             fold_idx, folds, 
             config['model_config'], config['training_config'],
             data_dicts, output_dir, logger
         )
         all_fold_results.append(fold_results)
+        
+        fold_time = datetime.now() - fold_start_time
+        logger.info(f"Fold {fold_idx+1} completed in {fold_time}")
         sys.stdout.flush()
     
     # aggregate results
     final_results = aggregate_results(output_dir, logger)
     
-    
     total_time = datetime.now() - start_time
     logger.info(f"Training completed successfully in {total_time}")
     logger.info(f"All results saved to {output_dir}")
+    
+    # Print final summary
+    if final_results:
+        print("\n" + "="*60)
+        print("FINAL DUAL-PATHWAY MODEL RESULTS")
+        print("="*60)
+        print(f"Architecture: Dual-pathway with {args.fusion_type} fusion")
+        print(f"Overall Performance:")
+        print(f"  auPRC: {final_results['mean_auPRC']:.4f} ± {final_results['std_auPRC']:.4f}")
+        print(f"  auROC: {final_results['mean_auROC']:.4f} ± {final_results['std_auROC']:.4f}")
+        print(f"Results directory: {output_dir}")
+        print("="*60)
+    
     sys.stdout.flush()
 
 if __name__ == "__main__":

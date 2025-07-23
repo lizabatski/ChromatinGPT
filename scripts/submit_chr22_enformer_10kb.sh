@@ -22,7 +22,7 @@ H=8
 echo "Running configuration: Channels=$C, Layers=$L, Heads=$H"
 
 python experiments/enformer/train_enformer.py \
-  --data_file data/E005_deephistone_1024bp_chr22.npz \
+  --data_file data/E005_deephistone_10016bp_chr22.npz \
   --channels $C \
   --num_transformer_layers $L \
   --num_heads $H \

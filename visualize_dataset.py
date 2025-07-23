@@ -97,6 +97,9 @@ def compare_binary_to_chipseq(region_key, binary_labels, chipseq_base_path="raw/
     chrom, start, end = parse_region_key(region_key)
     region_length = end - start
     
+    # Create actual genomic coordinates for x-axis
+    genomic_positions = np.arange(start, end)
+    
     fig, axes = plt.subplots(len(markers) + 1, 1, figsize=(15, 2 * (len(markers) + 1)))
     
     # Plot binary labels first
@@ -107,7 +110,7 @@ def compare_binary_to_chipseq(region_key, binary_labels, chipseq_base_path="raw/
     axes[0].set_yticks(range(len(markers)))
     axes[0].set_yticklabels(markers)
     axes[0].set_ylabel("Markers")
-    axes[0].set_xlim(0, region_length)
+    axes[0].set_xlim(start, end)
     
     # Compare with each ChIP-seq file
     for i, marker in enumerate(markers):
@@ -121,9 +124,8 @@ def compare_binary_to_chipseq(region_key, binary_labels, chipseq_base_path="raw/
             # Get continuous signal
             chipseq_signal = get_chipseq_signal_in_region(peaks, chrom, start, end)
             
-            # Plot continuous signal
-            positions = np.arange(region_length)
-            ax.fill_between(positions, chipseq_signal, alpha=0.6, color='blue', label='ChIP-seq Signal')
+            # Plot continuous signal with actual genomic coordinates
+            ax.fill_between(genomic_positions, chipseq_signal, alpha=0.6, color='blue', label='ChIP-seq Signal')
             
             # Highlight your binary prediction
             binary_value = binary_labels[i]
@@ -136,11 +138,18 @@ def compare_binary_to_chipseq(region_key, binary_labels, chipseq_base_path="raw/
             
             ax.set_title(f"{marker} - ChIP-seq vs Binary")
             ax.set_ylabel("Fold Enrichment")
+            ax.set_xlim(start, end)
             ax.legend(fontsize=8)
+            
+            # Format x-axis to show genomic coordinates nicely
+            ax.ticklabel_format(style='plain', axis='x')
+            
+            # Add thousand separators to x-axis labels
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x):,}'))
             
             # Stats
             max_signal = np.max(chipseq_signal)
-            mean_signal = np.mean(chipseq_signal[chipseq_signal > 0])
+            mean_signal = np.mean(chipseq_signal[chipseq_signal > 0]) if np.any(chipseq_signal > 0) else 0
             coverage = np.sum(chipseq_signal > 0) / len(chipseq_signal) * 100
             
             stats_text = f"Max: {max_signal:.1f}, Mean: {mean_signal:.1f}, Coverage: {coverage:.1f}%"
@@ -150,8 +159,9 @@ def compare_binary_to_chipseq(region_key, binary_labels, chipseq_base_path="raw/
             ax.text(0.5, 0.5, f"No ChIP-seq data found for {marker}", 
                    transform=ax.transAxes, ha='center', va='center')
             ax.set_title(f"{marker} - No Data Available")
+            ax.set_xlim(start, end)
     
-    axes[-1].set_xlabel("Position (bp)")
+    axes[-1].set_xlabel("Genomic Position (bp)")
     plt.tight_layout()
     plt.savefig(f"plots/chipseq_comparison_{region_key.replace(':', '_').replace('-', '_')}.png", 
                 dpi=300, bbox_inches='tight')
@@ -327,5 +337,5 @@ if __name__ == "__main__":
     # Create plots directory
     os.makedirs("plots", exist_ok=True)
     
-    # Run analysis
+    
     run_comparison_analysis()
