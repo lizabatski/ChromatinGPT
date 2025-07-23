@@ -1,7 +1,27 @@
 import torch
+import argparse
+import os
+import json
 from model import NetDeepHistone              # Original DeepHistone
 from experiments.enformer.mini_enformer import NetDeepHistoneEnformer  # Enformer version
-from experiments.enformer.mini_dhica import SeparatePathwayModel    # Your dual-pathway model
+from experiments.enformer.mini_dhica import SeparatePathwayModel    # dual-pathway model
+
+
+parser = argparse.ArgumentParser(description="DeepHistone Model Analysis")
+parser.add_argument('--enformer_channels', type=int, default=1536)
+parser.add_argument('--enformer_layers', type=int, default=10)
+parser.add_argument('--enformer_heads', type=int, default=12)
+parser.add_argument('--enformer_dropout', type=float, default=0.1)
+parser.add_argument('--enformer_conv_blocks', type=int, default=5)
+
+parser.add_argument('--dual_channels', type=int, default=1536)
+parser.add_argument('--dual_layers', type=int, default=11)
+parser.add_argument('--dual_heads', type=int, default=8)
+parser.add_argument('--dual_dropout', type=float, default=0.2)
+parser.add_argument('--dual_conv_blocks', type=int, default=7)
+parser.add_argument('--dual_fusion', type=str, default='concat')
+
+args = parser.parse_args()
 
 def count_parameters(model, name):
     total_params = sum(p.numel() for p in model.parameters())
@@ -80,26 +100,26 @@ deep_histone = NetDeepHistone()
 print("Instantiating DeepHistone-Enformer...")
 deep_histone_enformer = NetDeepHistoneEnformer(
     input_channels=5,
-    channels=1536,             # Width
-    num_transformer_layers=10,  # Layers
-    num_heads=12,               # Attention heads
-    dropout=0.1,               # Updated dropout
+    channels=args.enformer_channels,
+    num_transformer_layers=args.enformer_layers,
+    num_heads=args.enformer_heads,
+    dropout=args.enformer_dropout,
     num_histones=7,
     pooling_type='attention',
-    num_conv_blocks=5         # Updated conv blocks
+    num_conv_blocks=args.enformer_conv_blocks
 )
 
 # === Instantiate Dual-Pathway Model ===
 print("Instantiating Dual-Pathway Model...")
 dual_pathway_model = SeparatePathwayModel(
-    channels=1024,              # Smaller than Enformer for comparison
-    num_transformer_layers=6,  # Fewer layers than full Enformer
-    num_heads=8,
-    dropout=0.4,
+    channels=args.dual_channels,
+    num_transformer_layers=args.dual_layers,
+    num_heads=args.dual_heads,
+    dropout=args.dual_dropout,
     num_histones=7,
     pooling_type='attention',
-    num_conv_blocks=5,
-    fusion_type='concat'       # Using concat fusion
+    num_conv_blocks=args.dual_conv_blocks,
+    fusion_type=args.dual_fusion
 )
 
 # === Count and print parameters ===
@@ -185,3 +205,51 @@ print(f"  - DNase pathway: 1 input channel")
 print(f"  - Fusion type: concat")
 
 print("=" * 60)
+
+
+# ===== save results to JSON =====
+output_dir = "results/model_analysis"
+os.makedirs(output_dir, exist_ok=True)
+
+# create a unique filename with model configs
+output_file = (
+    f"{output_dir}/params_enformer_c{args.enformer_channels}"
+    f"_l{args.enformer_layers}_h{args.enformer_heads}"
+    f"_dual_c{args.dual_channels}_l{args.dual_layers}_h{args.dual_heads}"
+    ".json"
+)
+
+# prep
+results = {
+    "enformer_config": {
+        "channels": args.enformer_channels,
+        "layers": args.enformer_layers,
+        "heads": args.enformer_heads,
+        "dropout": args.enformer_dropout,
+        "conv_blocks": args.enformer_conv_blocks
+    },
+    "dual_pathway_config": {
+        "channels": args.dual_channels,
+        "layers": args.dual_layers,
+        "heads": args.dual_heads,
+        "dropout": args.dual_dropout,
+        "conv_blocks": args.dual_conv_blocks,
+        "fusion": args.dual_fusion
+    },
+    "parameter_counts": {
+        "DeepHistone_Original": original_params,
+        "DeepHistone_Enformer": enformer_params,
+        "Dual_Pathway": dual_pathway_params
+    },
+    "memory_estimate_MB": {
+        "DeepHistone_Original": round(original_memory, 1),
+        "DeepHistone_Enformer": round(enformer_memory, 1),
+        "Dual_Pathway": round(dual_pathway_memory, 1)
+    }
+}
+
+# save to json
+with open(output_file, "w") as f:
+    json.dump(results, f, indent=4)
+
+print(f"\nResults saved to: {output_file}")

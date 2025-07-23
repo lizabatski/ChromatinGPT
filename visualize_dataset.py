@@ -296,6 +296,38 @@ def extend_comparison_to_larger_regions(data_file, chipseq_base_path="raw/E005",
         plt.savefig(f"plots/extended_context_{region_key.replace(':', '_').replace('-', '_')}.png", 
                     dpi=300, bbox_inches='tight')
         plt.show()
+def find_false_negatives(data_file, chipseq_base_path="raw/E005",
+                         markers=['H3K4me1', 'H3K4me3', 'H3K27me3', 'H3K36me3', 'H3K9me3', 'H3K9ac', 'H3K27ac'],
+                         min_signal_threshold=0.1):
+    """
+    Find regions labeled negative but overlapping a ChIP-seq signal
+    """
+    print("\nScanning for false negatives...")
+    data = np.load(data_file, allow_pickle=True)
+    labels = data['label'][:, 0, :]
+    keys = data['keys']
+    
+    false_negatives = defaultdict(list)  # marker -> list of region keys
+    
+    for marker_idx, marker in enumerate(markers):
+        chipseq_file = f"{chipseq_base_path}/E005-{marker}.narrowPeak"
+        peaks = load_chipseq_peaks(chipseq_file)
+        print(f"Checking {marker}...")
+        
+        for i, region_key in enumerate(keys):
+            chrom, start, end = parse_region_key(region_key)
+            chipseq_signal = get_chipseq_signal_in_region(peaks, chrom, start, end)
+            
+            if labels[i, marker_idx] == 0 and np.max(chipseq_signal) > min_signal_threshold:
+                false_negatives[marker].append(region_key)
+    
+        print(f"  Found {len(false_negatives[marker])} false negatives for {marker}")
+    
+    # Summary
+    total_fn = sum(len(v) for v in false_negatives.values())
+    print(f"\nTotal false negatives found: {total_fn}")
+    
+    return false_negatives
 
 # Example usage functions
 def run_comparison_analysis(data_file='data/E005_deephistone_1024bp_chr22.npz'):
@@ -332,6 +364,8 @@ def run_comparison_analysis(data_file='data/E005_deephistone_1024bp_chr22.npz'):
     print("EXTENDED CONTEXT ANALYSIS")
     print("="*80)
     extend_comparison_to_larger_regions(data_file, context_extension=2000, num_examples=3)
+
+
 
 if __name__ == "__main__":
     # Create plots directory
