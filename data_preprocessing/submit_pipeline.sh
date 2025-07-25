@@ -3,7 +3,7 @@
 #SBATCH --account=def-majewski         
 #SBATCH --time=02:00:00                
 #SBATCH --cpus-per-task=12            
-#SBATCH --mem=128G                      
+#SBATCH --mem=510G                      
 #SBATCH --output=logs/preprocess_%j.out
 #SBATCH --error=logs/preprocess_%j.err
 #SBATCH --mail-type=END,FAIL

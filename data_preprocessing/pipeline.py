@@ -503,8 +503,8 @@ def save_dataset_target_format(output_path, dna_onehot, dnase_scores, labels, ge
     
     np.savez_compressed(
         output_path,
-        dna=dna_onehot.astype(np.float64),     
-        dnase=dnase_array.astype(np.float64),   
+        dna=dna_onehot.astype(np.float32),     
+        dnase=dnase_array.astype(np.float32),   
         label=labels.astype(np.int64),         
         keys=genomic_keys
     )

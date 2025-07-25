@@ -1,0 +1,28 @@
+====================================================================================================
+DEEPHISTONE PREPROCESSING VALIDATION REPORT
+====================================================================================================
+Dataset: data/E005_deephistone_1024bp_chr22.npz
+Total regions: 35,013
+Markers analyzed: H3K4me1, H3K4me3, H3K27me3, H3K36me3, H3K9me3, H3K9ac, H3K27ac
+Generated: 2025-07-23 13:45:47.470385
+
+DATASET OVERVIEW
+--------------------------------------------------
+Per-marker positive regions:
+  H3K4me1   : 11,008 ( 31.4%)
+  H3K4me3   :  3,902 ( 11.1%)
+  H3K27me3  :  2,516 (  7.2%)
+  H3K36me3  : 15,342 ( 43.8%)
+  H3K9me3   :  6,462 ( 18.5%)
+  H3K9ac    :  1,464 (  4.2%)
+  H3K27ac   :  5,158 ( 14.7%)
+
+Multi-label statistics:
+  Regions with 0 markers: 0
+  Regions with 1 marker:  26,665
+  Regions with 2+ markers: 8,348
+  Max markers per region: 6
+  Mean markers per region: 1.31
+
+ACCURACY ANALYSIS
+--------------------------------------------------
