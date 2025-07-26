@@ -31,5 +31,7 @@ model/
 # Ignore results directory
 results/
 
+plots/
+
 # Ignore large model files
 *.pth
