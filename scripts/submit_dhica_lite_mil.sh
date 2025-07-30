@@ -1,17 +1,18 @@
 #!/bin/bash
-#SBATCH --job-name=dual_pathway_lite_chr22
+#SBATCH --job-name=dual_pathway_lite_mil_full
 #SBATCH --account=def-majewski
-#SBATCH --time=12:00:00  
+#SBATCH --time=30:00:00  
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=512G
 #SBATCH --gres=gpu:1
-#SBATCH --output=logs/dual_pathway_lite_concat_chr22_%j.out
-#SBATCH --error=logs/dual_pathway_lite_concat_chr22_%j.err
+#SBATCH --output=logs/dual_pathway_heavy_lite_mil_full_%j.out
+#SBATCH --error=logs/dual_pathway_heavy_lite_mil_full_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=elizabeth.kourbatski@mail.mcgill.ca
 
-C=128    
+C=256   
 H=4
+L=1
 CONV=2
 
 source ~/ChromatinGPT/DeepHistone/chromatingpt/bin/activate
@@ -34,19 +35,19 @@ echo "  Optimizations: Memory-efficient DataLoader, mixed precision"
 echo "Training started at: $(date)"
 start_time=$(date +%s)
 
-python experiments/enformer/v2/train_dhica_v2.py \
+python experiments/enformer/v3/train_dhica_v3.py \
   --data_file data/E005_deephistone_2048bp.npz \
   --channels $C \
   --num_transformer_layers $L \
   --num_heads $H \
   --dropout 0.3 \
-  --batch_size 128 \
+  --batch_size 32 \
   --learning_rate 0.001 \
   --max_epochs 15 \
   --early_stopping_patience 3 \
   --pooling_type attention \
   --num_conv_blocks $CONV \
-  --fusion_type concat \
+  --fusion_type mil \
   --seed 42
 
 # Calculate training time

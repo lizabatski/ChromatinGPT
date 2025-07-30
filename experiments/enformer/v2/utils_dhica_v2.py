@@ -3,6 +3,7 @@ import torch
 from sklearn.metrics import roc_auc_score, average_precision_score
 from typing import Dict, List, Tuple
 from torch.utils.data import Dataset, DataLoader
+from torch.amp import autocast, GradScaler
 
 # Define histone modifications
 histones = ['H3K4me1', 'H3K4me3', 'H3K27me3', 'H3K36me3', 'H3K9me3', 'H3K9ac', 'H3K27ac']
@@ -19,64 +20,81 @@ def loadRegions(regions_indexs: List, dna_dict: Dict, dns_dict: Dict, label_dict
 def model_train(model, train_loader, device):
     model.forward_fn.train()
     total_loss = 0.0
-    
+
+    scaler = getattr(model, 'scaler', None)
+    if scaler is None:
+        model.scaler = GradScaler()
+        scaler = model.scaler
+
     for dna_batch, dnase_batch, label_batch in train_loader:
         if device.type == 'cuda':
             dna_batch = dna_batch.cuda(non_blocking=True)
-            dnase_batch = dnase_batch.cuda(non_blocking=True) 
+            dnase_batch = dnase_batch.cuda(non_blocking=True)
             label_batch = label_batch.cuda(non_blocking=True)
-        
+
+        with autocast(device_type='cuda'):
+            output = model.forward_fn(dna_batch, dnase_batch)
+
+        loss = model.criterion(output.float(), label_batch.float())
+
         model.optimizer.zero_grad()
-        output = model.forward_fn(dna_batch, dnase_batch)
-        loss = model.criterion(output, label_batch)
-        loss.backward()
-        model.optimizer.step()
-        
+        scaler.scale(loss).backward()
+        scaler.step(model.optimizer)
+        scaler.update()
+
         total_loss += loss.item()
-    
+
     return total_loss / len(train_loader)
+
 
 def model_eval(model, eval_loader, device):
     model.forward_fn.eval()
     total_loss = 0.0
     all_predictions = []
     all_labels = []
-    
+
     with torch.no_grad():
         for dna_batch, dnase_batch, label_batch in eval_loader:
             if device.type == 'cuda':
                 dna_batch = dna_batch.cuda(non_blocking=True)
                 dnase_batch = dnase_batch.cuda(non_blocking=True)
                 label_batch = label_batch.cuda(non_blocking=True)
-            
-            output = model.forward_fn(dna_batch, dnase_batch)
-            loss = model.criterion(output, label_batch)
-            
+
+            with autocast(device_type='cuda'):
+                output = model.forward_fn(dna_batch, dnase_batch)
+
+            loss = model.criterion(output.float(), label_batch.float())
+
             total_loss += loss.item()
             all_predictions.append(output.cpu().numpy())
             all_labels.append(label_batch.cpu().numpy())
-    
+
     all_predictions = np.concatenate(all_predictions, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
-    
+
     return total_loss / len(eval_loader), all_labels, all_predictions
+
+
 
 def model_predict(model, test_loader, device):
     model.forward_fn.eval()
     all_predictions = []
     all_labels = []
-    
+
     with torch.no_grad():
         for dna_batch, dnase_batch, label_batch in test_loader:
             if device.type == 'cuda':
                 dna_batch = dna_batch.cuda(non_blocking=True)
                 dnase_batch = dnase_batch.cuda(non_blocking=True)
-            
-            output = model.forward_fn(dna_batch, dnase_batch)
+
+            with autocast(device_type='cuda'):
+                output = model.forward_fn(dna_batch, dnase_batch)
+
             all_predictions.append(output.cpu().numpy())
             all_labels.append(label_batch.cpu().numpy())
-    
+
     return np.concatenate(all_labels, axis=0), np.concatenate(all_predictions, axis=0)
+
 
 
 def calculate_metrics(labels: np.ndarray, predictions: np.ndarray, histone_idx: int) -> Tuple[float, float]:
@@ -151,41 +169,27 @@ class LazyHistoneDataset(Dataset):
         self.indices = indices
         self.data_handle = None
         self.key_to_idx = None
-        
-    def _init_worker(self):
-        """Initialize data handle in each worker process"""
+
+    def _lazy_init(self):
         if self.data_handle is None:
             self.data_handle = np.load(self.data_file, mmap_mode='r')
-            all_keys = self.data_handle['keys'][:]
+            all_keys = self.data_handle['keys']
             self.key_to_idx = {key: i for i, key in enumerate(all_keys)}
-        
+
     def __len__(self):
         return len(self.indices)
-    
+
     def __getitem__(self, idx):
-        # Initialize data handle if not done (for worker processes)
-        self._init_worker()
-        
+        self._lazy_init()
         key = self.indices[idx]
         data_idx = self.key_to_idx[key]
-        
-        try:
-            dna = self.data_handle['dna'][data_idx].squeeze()
-            dnase = self.data_handle['dnase'][data_idx].squeeze()
-            label = self.data_handle['label'][data_idx].squeeze()
-            
-            return torch.tensor(dna, dtype=torch.float32), \
-                   torch.tensor(dnase, dtype=torch.float32).unsqueeze(0), \
-                   torch.tensor(label, dtype=torch.float32)
-        except Exception as e:
-            # Fallback: reinitialize and try again
-            self.data_handle = None
-            self._init_worker()
-            
-            dna = self.data_handle['dna'][data_idx].squeeze()
-            dnase = self.data_handle['dnase'][data_idx].squeeze()
-            label = self.data_handle['label'][data_idx].squeeze()
-            
-            return torch.tensor(dna, dtype=torch.float32), \
-                   torch.tensor(dnase, dtype=torch.float32).unsqueeze(0), \
-                   torch.tensor(label, dtype=torch.float32)
+
+        dna = self.data_handle['dna'][data_idx].squeeze()
+        dnase = self.data_handle['dnase'][data_idx].squeeze()
+        label = self.data_handle['label'][data_idx].squeeze()
+
+        return (
+            torch.tensor(dna, dtype=torch.float32),
+            torch.tensor(dnase, dtype=torch.float32).unsqueeze(0),
+            torch.tensor(label, dtype=torch.float32)
+        )

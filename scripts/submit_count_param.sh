@@ -44,7 +44,7 @@ echo "Running analysis with the following configuration:"
 echo "Enformer: channels=$ENFORMER_CHANNELS, layers=$ENFORMER_LAYERS, heads=$ENFORMER_HEADS, dropout=$ENFORMER_DROPOUT, conv_blocks=$ENFORMER_CONV_BLOCKS"
 echo "Dual-Pathway: channels=$DUAL_CHANNELS, layers=$DUAL_LAYERS, heads=$DUAL_HEADS, dropout=$DUAL_DROPOUT, conv_blocks=$DUAL_CONV_BLOCKS, fusion=$DUAL_FUSION"
 
-python scripts/analyze_models.py \
+python count_param.py \
   --enformer_channels $ENFORMER_CHANNELS \
   --enformer_layers $ENFORMER_LAYERS \
   --enformer_heads $ENFORMER_HEADS \

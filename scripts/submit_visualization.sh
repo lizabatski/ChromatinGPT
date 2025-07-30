@@ -17,9 +17,7 @@ cd ~/ChromatinGPT/DeepHistone
 
 # paths to results directories
 RESULTS_DIRS=(
-    "results/E005_deephistone_1024bp_chr22_dual_pathway_c1024_l6_h8_concat"
-    "results/E005_deephistone_2048bp_chr22_dual_pathway_c1024_l6_h8_concat"
-    "results/E005_deephistone_10048bp_chr22_dual_pathway_c1024_l6_h8_concat"
+    "results/E005/enformer/E005_deephistone_enformer_c256_l2_h8_full"
 )
 
 

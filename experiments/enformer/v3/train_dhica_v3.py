@@ -1,7 +1,7 @@
-from mini_dhica_v2 import DeepHistoneEnformer
+from mini_dhica_v3 import DeepHistoneEnformer
 import copy
 import numpy as np
-from utils_dhica_v2 import (metrics, model_train, model_eval, model_predict, histones, LazyHistoneDataset)  # ADD LazyHistoneDataset here
+from utils_dhica_v3 import (metrics, model_train, model_eval, model_predict, histones, loadRegions)
 import torch
 import os
 from datetime import datetime
@@ -9,51 +9,7 @@ import random
 import argparse
 import sys
 import json
-from torch.utils.data import DataLoader
-import time
-
-def time_batches(model, train_loader, device, num_batches=5):
-    """Time first few batches to check performance"""
-    print(f"Timing first {num_batches} batches...")
-    
-    model.forward_fn.train()
-    batch_times = []
-    
-    for batch_idx, (dna_batch, dnase_batch, label_batch) in enumerate(train_loader):
-        if batch_idx >= num_batches:
-            break
-            
-        batch_start = time.time()
-        
-        # Move to device
-        if device.type == 'cuda':
-            dna_batch = dna_batch.cuda(non_blocking=True)
-            dnase_batch = dnase_batch.cuda(non_blocking=True)
-            label_batch = label_batch.cuda(non_blocking=True)
-
-        # forward pass
-        output = model.forward_fn(dna_batch, dnase_batch)
-        loss = model.criterion(output.float(), label_batch.float())
-
-        # backward pass
-        model.optimizer.zero_grad()
-        loss.backward()
-        model.optimizer.step()
-
-        batch_time = time.time() - batch_start
-        batch_times.append(batch_time)
-        
-        print(f"Batch {batch_idx + 1}: {batch_time:.2f} seconds")
-    
-    avg_time = sum(batch_times) / len(batch_times)
-    estimated_epoch_time = avg_time * len(train_loader) / 3600  
-    
-    print(f"\nAverage batch time: {avg_time:.2f} seconds")
-    print(f"Estimated epoch time: {estimated_epoch_time:.2f} hours")
-    print(f"Total batches in epoch: {len(train_loader)}")
-    
-    return avg_time
-
+from typing import List, Dict
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DeepHistone-Enformer Dual-Pathway Training Script")
@@ -77,7 +33,7 @@ def parse_args():
                         choices=['attention', 'max'],
                         help='Pooling type (default: attention)')
     parser.add_argument('--fusion_type', type=str, default='concat',
-                        choices=['concat', 'cross_attention', 'gated'],
+                        choices=['concat', 'cross_attention', 'gated', 'mil'],
                         help='Fusion type for combining DNA and DNase (default: concat)')
     
     # training arguments
@@ -128,19 +84,193 @@ def load_data(data_file: str):
             print(f"  Labels: {f['label'].shape}")
             sys.stdout.flush()
             
-            # Only load the keys - this is the key optimization!
+            # Load keys into memory
             indexs = f['keys'][:]
-            print(f"Successfully loaded {len(indexs)} sample keys")
+            print(f"Creating dictionaries for {len(indexs)} samples...")
+            print("WARNING: Loading entire dataset into memory. This may take a while for large datasets...")
             sys.stdout.flush()
             
-            # Return data_file path instead of loaded dictionaries
-            return indexs, data_file
+            # Use the efficient approach - let NumPy handle the memory mapping
+            dna_dict = dict(zip(f['keys'], f['dna']))
+            print("DNA dictionary created")
+            sys.stdout.flush()
+            
+            dns_dict = dict(zip(f['keys'], f['dnase']))
+            print("DNase dictionary created")
+            sys.stdout.flush()
+            
+            lab_dict = dict(zip(f['keys'], f['label']))
+            print("Label dictionary created")
+            sys.stdout.flush()
+            
+            print(f"Successfully loaded {len(indexs)} samples")
+            sys.stdout.flush()
+            
+            return indexs, dna_dict, dns_dict, lab_dict
             
     except Exception as e:
         print(f"Error loading data: {e}")
         import traceback
         traceback.print_exc()
         raise
+
+    
+def train_single_model_optimized(train_index, valid_index, test_index,
+                                model_config: dict,
+                                training_config: dict,
+                                data_dicts: dict,
+                                output_dir: str,
+                                logger):
+    
+    logger.info("Starting optimized training with full dataset (60:20:20 split)...")
+    logger.info(f"  Train samples: {len(train_index):,}")
+    logger.info(f"  Valid samples: {len(valid_index):,}")
+    logger.info(f"  Test samples: {len(test_index):,}")
+    
+    # Initialize model
+    model = DeepHistoneEnformer(
+        use_gpu=torch.cuda.is_available(),
+        learning_rate=training_config['learning_rate'],
+        **model_config
+    )
+    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"Using device: {device}")
+    if torch.cuda.is_available():
+        logger.info(f"CUDA device: {torch.cuda.get_device_name()}")
+    
+    # Training optimizations for large dataset
+    history = {
+        'train_loss': [],
+        'valid_loss': [],
+        'valid_auPRC': [],
+        'valid_auROC': [],
+        'learning_rate': []
+    }
+    
+    best_valid_auPRC = 0
+    best_valid_loss = float('inf')
+    early_stop_count = 0
+    best_model_path = os.path.join("/tmp", "best_model_full_dataset.pth")
+    
+    logger.info("Starting training loop...")
+    for epoch in range(training_config['max_epochs']):
+        epoch_start = datetime.now()
+        
+        logger.info(f"  Epoch {epoch+1}/{training_config['max_epochs']}")
+        
+        # Shuffle training data each epoch
+        np.random.shuffle(train_index)
+        
+        # Training with progress tracking
+        logger.info(f"    Training on {len(train_index):,} samples...")
+        train_loss = model_train_with_progress(
+            train_index, model, training_config['batch_size'],
+            data_dicts['dna'], data_dicts['dns'], data_dicts['lab'], logger
+        )
+        logger.info(f"    Training completed. Loss: {train_loss:.4f}")
+        
+        # Validation
+        logger.info(f"    Validating on {len(valid_index):,} samples...")
+        valid_loss, valid_lab, valid_pred = model_eval(
+            valid_index, model, training_config['batch_size'],
+            data_dicts['dna'], data_dicts['dns'], data_dicts['lab']
+        )
+        
+        valid_auPRC, valid_auROC = metrics(valid_lab, valid_pred, 'Valid', valid_loss)
+        mean_auPRC = np.mean(list(valid_auPRC.values()))
+        mean_auROC = np.mean(list(valid_auROC.values()))
+        
+        # Save history
+        history['train_loss'].append(train_loss)
+        history['valid_loss'].append(valid_loss)
+        history['valid_auPRC'].append(mean_auPRC)
+        history['valid_auROC'].append(mean_auROC)
+        history['learning_rate'].append(model.optimizer.param_groups[0]['lr'])
+        
+        # Save best model
+        if mean_auPRC > best_valid_auPRC:
+            torch.save(model.forward_fn.state_dict(), best_model_path)
+            best_valid_auPRC = mean_auPRC
+            logger.info(f"    New best model saved! auPRC: {best_valid_auPRC:.4f}")
+        
+        # Early stopping with learning rate reduction
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            early_stop_count = 0
+        else:
+            model.updateLR(0.5)  # Reduce learning rate
+            early_stop_count += 1
+            logger.info(f"    Learning rate reduced. Early stopping: {early_stop_count}/{training_config['early_stopping_patience']}")
+            
+            if early_stop_count >= training_config['early_stopping_patience']:
+                logger.info("    Early stopping triggered")
+                break
+        
+        epoch_time = datetime.now() - epoch_start
+        logger.info(f"    Epoch completed in {epoch_time}")
+        logger.info(f"    train_loss={train_loss:.4f}, valid_loss={valid_loss:.4f}")
+        logger.info(f"    valid_auPRC={mean_auPRC:.4f}, valid_auROC={mean_auROC:.4f}")
+        sys.stdout.flush()
+    
+    # Load best model for testing
+    if os.path.exists(best_model_path):
+        model.forward_fn.load_state_dict(torch.load(best_model_path, map_location=device))
+        logger.info("Best model loaded for testing")
+    
+    # Test evaluation
+    logger.info(f"Evaluating on test set ({len(test_index):,} samples)...")
+    test_lab, test_pred = model_predict(
+        test_index, model, training_config['batch_size'],
+        data_dicts['dna'], data_dicts['dns'], data_dicts['lab']
+    )
+    
+    test_auPRC, test_auROC = metrics(test_lab, test_pred, 'Test')
+    
+    # Save results
+    results = {
+        'history': history,
+        'test_auPRC': test_auPRC,
+        'test_auROC': test_auROC,
+        'test_predictions': test_pred,
+        'test_labels': test_lab,
+        'best_valid_auPRC': best_valid_auPRC,
+        'model_config': model_config,
+        'training_config': training_config,
+    }
+    
+    # Save to files
+    results_file = os.path.join(output_dir, 'training_results.npz')
+    np.savez_compressed(results_file, **results)
+    
+    logger.info("Training completed successfully")
+    return results
+
+def model_train_with_progress(regions: List, model, batchsize: int, 
+                             dna_dict: Dict, dns_dict: Dict, label_dict: Dict, logger) -> float:
+    """Training function with progress tracking for large datasets"""
+    train_loss = []
+    total_batches = (len(regions) + batchsize - 1) // batchsize
+    
+    # Progress reporting every 10% or 100 batches, whichever is larger
+    report_interval = max(100, total_batches // 10)
+    
+    for i in range(0, len(regions), batchsize):
+        batch_end = min(i + batchsize, len(regions))
+        regions_batch = regions[i:batch_end]
+        
+        seq_batch, dns_batch, lab_batch = loadRegions(regions_batch, dna_dict, dns_dict, label_dict)
+        loss = model.train_on_batch(seq_batch, dns_batch, lab_batch)
+        train_loss.append(loss)
+        
+        batch_num = i // batchsize + 1
+        if batch_num % report_interval == 0:
+            avg_loss = np.mean(train_loss[-report_interval:])
+            logger.info(f"      Batch {batch_num:,}/{total_batches:,} ({batch_num/total_batches*100:.1f}%) - Loss: {avg_loss:.4f}")
+            sys.stdout.flush()
+    
+    return np.mean(train_loss)
+
 
 def create_folds(indexs: np.ndarray, n_folds: int = 5):
     np.random.shuffle(indexs)
@@ -156,12 +286,9 @@ def train_fold(fold_idx: int,
                folds: list, 
                model_config: dict,
                training_config: dict,
-               data_file: str,
+               data_dicts: dict,
                output_dir: str,
                logger):
-    
-    from utils_dhica_v2 import model_train, model_eval, model_predict, LazyHistoneDataset
-    from torch.utils.data import DataLoader
     
     fold_output_dir = os.path.join(output_dir, f'fold_{fold_idx+1}')
     os.makedirs(fold_output_dir, exist_ok=True)
@@ -174,6 +301,7 @@ def train_fold(fold_idx: int,
     train_valid_index = np.concatenate(train_valid_folds)
     np.random.shuffle(train_valid_index)
     
+    # 80% train, 20% validation
     train_size = int(len(train_valid_index) * 0.8)
     train_index = train_valid_index[:train_size]
     valid_index = train_valid_index[train_size:]
@@ -183,42 +311,7 @@ def train_fold(fold_idx: int,
     logger.info(f"  Test samples: {len(test_index)}")
     sys.stdout.flush()
     
-    # Create DataLoaders
-    train_dataset = LazyHistoneDataset(data_file, train_index)
-    valid_dataset = LazyHistoneDataset(data_file, valid_index)
-    test_dataset = LazyHistoneDataset(data_file, test_index)
-    
-    train_loader = DataLoader(
-    
-    train_dataset,
-    batch_size=training_config['batch_size'],
-    shuffle=True,
-    num_workers=4,
-    pin_memory=True,
-    persistent_workers=True,
-    drop_last=True  
-     )
-
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=training_config['batch_size'],
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=training_config['batch_size'],
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    
-    # initialize model
+    # initialize model with dual-pathway configuration
     logger.info("Initializing dual-pathway model...")
     model = DeepHistoneEnformer(
         use_gpu=torch.cuda.is_available(),
@@ -226,13 +319,12 @@ def train_fold(fold_idx: int,
         **model_config
     )
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Using device: {device}")
     if torch.cuda.is_available():
         logger.info(f"CUDA device: {torch.cuda.get_device_name()}")
     sys.stdout.flush() 
     
-    # Initialize history
     history = {
         'train_loss': [],
         'valid_loss': [],
@@ -244,23 +336,31 @@ def train_fold(fold_idx: int,
     best_valid_auPRC = 0
     best_valid_loss = float('inf')
     early_stop_count = 0
+    best_model_path = os.path.join(fold_output_dir, 'best_model.pth')
     
     # training loop
     logger.info("Starting training loop...")
     for epoch in range(training_config['max_epochs']):
         epoch_start = datetime.now()
+        np.random.shuffle(train_index)
         
         logger.info(f"  Epoch {epoch+1}/{training_config['max_epochs']}")
         sys.stdout.flush() 
 
-        # training - use optimized functions
-        train_loss = model_train(model, train_loader, device)
+        # training
+        train_loss = model_train(
+            train_index, model, training_config['batch_size'],
+            data_dicts['dna'], data_dicts['dns'], data_dicts['lab']
+        )
         logger.info(f"    Training completed. Loss: {train_loss:.4f}")
         logger.info(f"    Validating on {len(valid_index)} samples...")
         sys.stdout.flush() 
         
-        # validation - use optimized functions
-        valid_loss, valid_lab, valid_pred = model_eval(model, valid_loader, device)
+        # validation
+        valid_loss, valid_lab, valid_pred = model_eval(
+            valid_index, model, training_config['batch_size'],
+            data_dicts['dna'], data_dicts['dns'], data_dicts['lab']
+        )
         
         valid_auPRC, valid_auROC = metrics(valid_lab, valid_pred, 'Valid', valid_loss)
         
@@ -276,7 +376,10 @@ def train_fold(fold_idx: int,
         
         # save best model
         if mean_auPRC > best_valid_auPRC:
+            # Make a temporary path in /tmp
             tmp_best_model_path = os.path.join("/tmp", f"best_model_fold_{fold_idx}.pth")
+
+            # Save to /tmp instead of home directory
             torch.save(model.forward_fn.state_dict(), tmp_best_model_path)
             best_valid_auPRC = mean_auPRC
             logger.info(f"    New best model saved to /tmp/! auPRC: {best_valid_auPRC:.4f}")
@@ -286,7 +389,7 @@ def train_fold(fold_idx: int,
             best_valid_loss = valid_loss
             early_stop_count = 0
         else:
-            model.updateLR(0.5)  # More aggressive LR reduction
+            model.updateLR(0.1)  # reduce learning rate
             early_stop_count += 1
             logger.info(f"    Early stopping counter: {early_stop_count}/{training_config['early_stopping_patience']}")
             
@@ -309,11 +412,14 @@ def train_fold(fold_idx: int,
     # test evaluation
     logger.info("Evaluating on test set...")
     sys.stdout.flush()
-    test_lab, test_pred = model_predict(model, test_loader, device)
+    test_lab, test_pred = model_predict(
+        test_index, model, training_config['batch_size'],
+        data_dicts['dna'], data_dicts['dns'], data_dicts['lab']
+    )
     
     test_auPRC, test_auROC = metrics(test_lab, test_pred, 'Test')
     
-    # save fold results (rest unchanged)
+    # save fold results
     fold_results = {
         'history': history,
         'test_auPRC': test_auPRC,
@@ -325,9 +431,11 @@ def train_fold(fold_idx: int,
         'training_config': training_config,
     }
     
+    # save results
     results_file = os.path.join(fold_output_dir, 'training_history.npz')
     np.savez_compressed(results_file, **fold_results)
     
+    # save predictions and labels as text files
     np.savetxt(os.path.join(fold_output_dir, 'test_labels.txt'), test_lab, fmt='%d', delimiter='\t')
     np.savetxt(os.path.join(fold_output_dir, 'test_predictions.txt'), test_pred, fmt='%.4f', delimiter='\t')
     
@@ -428,197 +536,10 @@ def aggregate_results(output_dir: str, logger):
         logger.error("No valid results found")
         return None
 
-def create_simple_splits(indexs: np.ndarray):
-    """Create simple 60:20:20 train/valid/test split"""
-    np.random.shuffle(indexs)
-    
-    total_samples = len(indexs)
-    train_size = int(total_samples * 0.6)
-    valid_size = int(total_samples * 0.2)
-    
-    train_index = indexs[:train_size]
-    valid_index = indexs[train_size:train_size + valid_size]
-    test_index = indexs[train_size + valid_size:]
-    
-    print(f"Data split:")
-    print(f"  Train: {len(train_index)} samples ({len(train_index)/total_samples*100:.1f}%)")
-    print(f"  Valid: {len(valid_index)} samples ({len(valid_index)/total_samples*100:.1f}%)")
-    print(f"  Test: {len(test_index)} samples ({len(test_index)/total_samples*100:.1f}%)")
-    
-    return train_index, valid_index, test_index
-
-def train_simple(model_config: dict,
-                training_config: dict,
-                train_index: np.ndarray,
-                valid_index: np.ndarray,
-                test_index: np.ndarray,
-                data_file: str,
-                output_dir: str,
-                logger):
-    
-    logger.info("Starting training with simple 60:20:20 split")
-    
-    # Create DataLoaders
-    train_dataset = LazyHistoneDataset(data_file, train_index)
-    valid_dataset = LazyHistoneDataset(data_file, valid_index)
-    test_dataset = LazyHistoneDataset(data_file, test_index)
-
-    num_workers = min(4, os.cpu_count() // 2)
-    
-    train_loader = DataLoader(
-    train_dataset,
-    batch_size=training_config['batch_size'],
-    shuffle=True,
-    num_workers=num_workers,
-    pin_memory=torch.cuda.is_available(),
-    worker_init_fn=lambda worker_id: np.random.seed(torch.initial_seed() % (2**32))
-)
-
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=training_config['batch_size'],
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        worker_init_fn=lambda worker_id: np.random.seed(torch.initial_seed() % (2**32))
-    )
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=training_config['batch_size'],
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        worker_init_fn=lambda worker_id: np.random.seed(torch.initial_seed() % (2**32))
-    )
-        
-    # initialize model
-    logger.info("Initializing dual-pathway model...")
-    model = DeepHistoneEnformer(
-        use_gpu=torch.cuda.is_available(),
-        learning_rate=training_config['learning_rate'],
-        **model_config
-    )
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    logger.info("="*50)
-    logger.info("TESTING BATCH TIMING FIX")
-    logger.info("="*50)
-
-    logger.info(f"Using device: {device}")
-    if torch.cuda.is_available():
-        logger.info(f"CUDA device: {torch.cuda.get_device_name()}")
-    sys.stdout.flush() 
-    
-    # Initialize history
-    history = {
-        'train_loss': [],
-        'valid_loss': [],
-        'valid_auPRC': [],
-        'valid_auROC': [],
-        'learning_rate': []
-    }
-    
-    best_valid_auPRC = 0
-    best_valid_loss = float('inf')
-    early_stop_count = 0
-    tmp_best_model_path = os.path.join("/tmp", "best_model_simple_split.pth")
-    
-    # training loop
-    logger.info("Starting training loop...")
-    for epoch in range(training_config['max_epochs']):
-        epoch_start = datetime.now()
-        
-        logger.info(f"  Epoch {epoch+1}/{training_config['max_epochs']}")
-        sys.stdout.flush() 
-
-        # training
-        train_loss = model_train(model, train_loader, device)
-        logger.info(f"    Training completed. Loss: {train_loss:.4f}")
-        logger.info(f"    Validating on {len(valid_index)} samples...")
-        sys.stdout.flush() 
-        
-        # validation
-        valid_loss, valid_lab, valid_pred = model_eval(model, valid_loader, device)
-        
-        valid_auPRC, valid_auROC = metrics(valid_lab, valid_pred, 'Valid', valid_loss)
-        
-        mean_auPRC = np.mean(list(valid_auPRC.values()))
-        mean_auROC = np.mean(list(valid_auROC.values()))
-        
-        # save history
-        history['train_loss'].append(train_loss)
-        history['valid_loss'].append(valid_loss)
-        history['valid_auPRC'].append(mean_auPRC)
-        history['valid_auROC'].append(mean_auROC)
-        history['learning_rate'].append(model.optimizer.param_groups[0]['lr'])
-        
-        # save best model
-        if mean_auPRC > best_valid_auPRC:
-            torch.save(model.forward_fn.state_dict(), tmp_best_model_path)
-            best_valid_auPRC = mean_auPRC
-            logger.info(f"    New best model saved to /tmp/! auPRC: {best_valid_auPRC:.4f}")
-        
-        # early stopping logic
-        if valid_loss < best_valid_loss:
-            best_valid_loss = valid_loss
-            early_stop_count = 0
-        else:
-            model.updateLR(0.5)  # LR reduction
-            early_stop_count += 1
-            logger.info(f"    Early stopping counter: {early_stop_count}/{training_config['early_stopping_patience']}")
-            
-            if early_stop_count >= training_config['early_stopping_patience']:
-                logger.info("    Early stopping triggered")
-                sys.stdout.flush()
-                break
-        
-        epoch_time = datetime.now() - epoch_start
-        logger.info(f"    Epoch completed in {epoch_time}")
-        logger.info(f"    train_loss={train_loss:.4f}, valid_loss={valid_loss:.4f}")
-        logger.info(f"    valid_auPRC={mean_auPRC:.4f}, valid_auROC={mean_auROC:.4f}")
-        sys.stdout.flush()
-    
-    # load best model for testing
-    if os.path.exists(tmp_best_model_path):
-        model.forward_fn.load_state_dict(torch.load(tmp_best_model_path, map_location=device))
-        logger.info("Best model loaded from /tmp/ for testing")
-    
-    # test evaluation
-    logger.info("Evaluating on test set...")
-    sys.stdout.flush()
-    test_lab, test_pred = model_predict(model, test_loader, device)
-    
-    test_auPRC, test_auROC = metrics(test_lab, test_pred, 'Test')
-    
-    # save results
-    results = {
-        'history': history,
-        'test_auPRC': test_auPRC,
-        'test_auROC': test_auROC,
-        'test_predictions': test_pred,
-        'test_labels': test_lab,
-        'best_valid_auPRC': best_valid_auPRC,
-        'model_config': model_config,
-        'training_config': training_config,
-    }
-    
-    results_file = os.path.join(output_dir, 'training_results.npz')
-    np.savez_compressed(results_file, **results)
-    
-    np.savetxt(os.path.join(output_dir, 'test_labels.txt'), test_lab, fmt='%d', delimiter='\t')
-    np.savetxt(os.path.join(output_dir, 'test_predictions.txt'), test_pred, fmt='%.4f', delimiter='\t')
-    
-    logger.info("Training completed successfully")
-    sys.stdout.flush()
-    
-    return results
-
 def main():
     args = parse_args()
     
-    # setup (keep same as before)
+    # setup
     print("=" * 60)
     print("DUAL-PATHWAY DEEPHISTONE-ENFORMER TRAINING")
     print("=" * 60)
@@ -653,7 +574,14 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     config_suffix = f"c{args.channels}_l{args.num_transformer_layers}_h{args.num_heads}_{args.fusion_type}"
-    output_dir = f"results/{dataset_name}_simple_split_{config_suffix}_{timestamp}"
+
+    slurm_id = os.environ.get("SLURM_ARRAY_TASK_ID", None)
+    if slurm_id:
+        job_suffix = f"_job{slurm_id}"
+    else:
+        job_suffix = ""
+
+    output_dir = f"results/{dataset_name}_dual_pathway_{config_suffix}_{timestamp}{job_suffix}"
 
     if os.path.exists(output_dir):
         raise RuntimeError(f"Output directory {output_dir} already exists. Aborting to prevent overwrite.")
@@ -688,8 +616,7 @@ def main():
             'seed': args.seed,
             'architecture': 'dual_pathway',
             'fusion_type': args.fusion_type,
-            'timestamp': timestamp,
-            'split_type': 'simple_60_20_20'
+            'timestamp': timestamp
         }
     }
     
@@ -703,47 +630,53 @@ def main():
     
     # load data
     start_time = datetime.now()
-    indexs, data_file = load_data(args.data_file)
+    indexs, dna_dict, dns_dict, lab_dict = load_data(args.data_file)
+    data_dicts = {'dna': dna_dict, 'dns': dns_dict, 'lab': lab_dict}
     
     load_time = datetime.now() - start_time
     logger.info(f"Data loading completed in {load_time}")
     sys.stdout.flush()
     
-    # create simple 60:20:20 split
-    train_index, valid_index, test_index = create_simple_splits(indexs)
-    
-    # train model
-    results = train_simple(
-        config['model_config'], 
-        config['training_config'],
-        train_index, 
-        valid_index, 
-        test_index,
-        data_file, 
-        output_dir, 
-        logger
+    # create folds
+    logger.info("Creating 60:20:20 train/valid/test split...")
+    np.random.shuffle(indexs)
+
+    # Calculate split sizes
+    n_samples = len(indexs)
+    train_size = int(0.6 * n_samples)
+    valid_size = int(0.2 * n_samples)
+
+    # Create splits
+    train_index = indexs[:train_size]
+    valid_index = indexs[train_size:train_size + valid_size]
+    test_index = indexs[train_size + valid_size:]
+
+    logger.info(f"Split sizes - Train: {len(train_index)}, Valid: {len(valid_index)}, Test: {len(test_index)}")
+
+    # Train single model
+    results = train_single_model_optimized(
+        train_index, valid_index, test_index,
+        config['model_config'], config['training_config'],
+        data_dicts, output_dir, logger
     )
-    
-    total_time = datetime.now() - start_time
-    logger.info(f"Training completed successfully in {total_time}")
-    logger.info(f"Results saved to {output_dir}")
-    
-    # Print final summary
-    test_auPRC = results['test_auPRC']
-    test_auROC = results['test_auROC']
-    mean_auPRC = np.mean(list(test_auPRC.values()))
-    mean_auROC = np.mean(list(test_auROC.values()))
-    
-    print("\n" + "="*60)
-    print("FINAL DUAL-PATHWAY MODEL RESULTS")
-    print("="*60)
-    print(f"Architecture: Dual-pathway with {args.fusion_type} fusion")
-    print(f"Split: 60:20:20 train/valid/test")
-    print(f"Overall Performance:")
-    print(f"  auPRC: {mean_auPRC:.4f}")
-    print(f"  auROC: {mean_auROC:.4f}")
-    print(f"Results directory: {output_dir}")
-    print("="*60)
+
+    # Print final results
+    if results:
+        print("\n" + "="*60)
+        print("FINAL DUAL-PATHWAY MODEL RESULTS")
+        print("="*60)
+        print(f"Architecture: Dual-pathway with {args.fusion_type} fusion")
+        print(f"Overall Performance:")
+        mean_test_auPRC = np.mean(list(results['test_auPRC'].values()))
+        mean_test_auROC = np.mean(list(results['test_auROC'].values()))
+        print(f"  Test auPRC: {mean_test_auPRC:.4f}")
+        print(f"  Test auROC: {mean_test_auROC:.4f}")
+        print(f"Results directory: {output_dir}")
+        print("="*60)
+        
+        total_time = datetime.now() - start_time
+        logger.info(f"Training completed successfully in {total_time}")
+        logger.info(f"All results saved to {output_dir}")
     
     sys.stdout.flush()
 

@@ -146,11 +146,11 @@ def train_fold(fold_idx: int,
     test_dataset = LazyHistoneDataset(data_file, test_index)
     
     train_loader = DataLoader(train_dataset, batch_size=training_config['batch_size'], 
-                             shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+                             shuffle=True, num_workers=4, pin_memory=torch.cuda.is_available())
     valid_loader = DataLoader(valid_dataset, batch_size=training_config['batch_size'], 
-                             shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+                             shuffle=False, num_workers=4, pin_memory=torch.cuda.is_available())
     test_loader = DataLoader(test_dataset, batch_size=training_config['batch_size'], 
-                            shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+                            shuffle=False, num_workers=4, pin_memory=torch.cuda.is_available())
     
     # initialize model
     logger.info("Initializing dual-pathway model...")

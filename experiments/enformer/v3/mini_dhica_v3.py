@@ -7,40 +7,15 @@ import math
 from typing import Optional, Tuple, Dict, List
 
 def exponential_linspace_int(start: int, end: int, num: int, divisible_by: int = 1) -> List[int]:
-    """Fixed version - ensures no zero channels"""
+    """reference lines 328-334 enformer.py"""
     def round_to_divisible(x):
-        result = int(np.round(x / divisible_by) * divisible_by)
-        return max(result, divisible_by)  # Ensure at least divisible_by channels
+        return int(np.round(x / divisible_by) * divisible_by)
         
     if num == 1:
-        return [max(end, divisible_by)]
-    
-    if num == 0:
-        return []
-        
-    # Ensure start and end are valid
-    start = max(start, divisible_by)
-    end = max(end, divisible_by)
-    
-    if start == end:
-        return [start] * num
+        return [end]
         
     base = np.exp(np.log(end / start) / (num - 1))
-    result = [round_to_divisible(start * base**i) for i in range(num)]
-    
-    # DEBUG: Print to see what's happening
-    #print(f"exponential_linspace_int: start={start}, end={end}, num={num}, result={result}")
-    
-    # Ensure no zeros - this is the key fix
-    result = [max(x, divisible_by) for x in result]
-    
-    # Additional safety check
-    for i, val in enumerate(result):
-        if val <= 0:
-            print(f"WARNING: Found zero/negative channel at index {i}: {val}, fixing to {divisible_by}")
-            result[i] = divisible_by
-    
-    return result
+    return [round_to_divisible(start * base**i) for i in range(num)]
 
 
 class RelativePositionalBias(nn.Module):
@@ -316,26 +291,25 @@ class TransformerBlock(nn.Module):
 
 # added this
 class FusionLayer(nn.Module):
-    """dHICA-style fusion layer combining DNA and DNase features"""
-    def __init__(self, channels: int, dropout: float = 0.1, fusion_type: str = 'concat'): #number of feature channels each pathway outputs
+    """Fusion layer combining DNA and DNase features"""
+    def __init__(self, channels: int, dropout: float = 0.1, fusion_type: str = 'concat', 
+                 d_attn: int = 128, entropy_lambda: float = 0.1):
         super().__init__()
         
-        # dHICA uses concat
-        self.fusion_type = fusion_type # 'concat', 'cross_attention', or 'gated'
+        self.fusion_type = fusion_type
+        self.entropy_lambda = entropy_lambda
         
         if fusion_type == 'concat':
-            # dHICA style
-            # concatenate DNA and DNase so channels double
+            # Original implementation
             self.projection = nn.Sequential(
                 nn.BatchNorm1d(channels * 2),
                 GELU(),
-                nn.Conv1d(channels * 2, channels, kernel_size=1),  # acts like a dense layer per position channels * 2 -> channe;s
+                nn.Conv1d(channels * 2, channels, kernel_size=1),
                 nn.Dropout(dropout)
             )
             
-        
         elif fusion_type == 'cross_attention':
-            # Cross-attention fusion
+            # Original implementation
             self.cross_attention = nn.MultiheadAttention(
                 embed_dim=channels,
                 num_heads=8,
@@ -345,11 +319,56 @@ class FusionLayer(nn.Module):
             self.norm = nn.LayerNorm(channels)
         
         elif fusion_type == 'gated':
-            # Gated fusion
+            # Original implementation
             self.gate = nn.Sequential(
                 nn.Conv1d(channels * 2, channels, kernel_size=1),
                 nn.Sigmoid()
             )
+            
+        elif fusion_type == 'mil':
+            # Multiple Instance Learning with gated attention
+            self.d_attn = d_attn
+            
+            # Gated attention parameters for each modality
+            self.U_dna = nn.Linear(channels, d_attn, bias=False)
+            self.V_dna = nn.Linear(channels, d_attn, bias=False)
+            self.b_dna = nn.Parameter(torch.zeros(d_attn))
+            self.c_dna = nn.Parameter(torch.zeros(d_attn))
+            
+            self.U_dnase = nn.Linear(channels, d_attn, bias=False)
+            self.V_dnase = nn.Linear(channels, d_attn, bias=False)
+            self.b_dnase = nn.Parameter(torch.zeros(d_attn))
+            self.c_dnase = nn.Parameter(torch.zeros(d_attn))
+            
+            # Shared attention weight parameter
+            self.W = nn.Parameter(torch.randn(d_attn))
+            
+            # Store attention weights for entropy regularization
+            self.attention_weights = None
+    
+    def compute_gated_attention(self, h_dna: torch.Tensor, h_dnase: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute gated attention weights for MIL fusion"""
+        # h_dna, h_dnase: (batch, channels)
+        
+        # Compute gated attention for DNA
+        gate_dna = torch.sigmoid(self.U_dna(h_dna) + self.c_dna)
+        attention_dna = torch.tanh(self.V_dna(h_dna) + self.b_dna)
+        gated_dna = gate_dna * attention_dna  # (batch, d_attn)
+        
+        # Compute gated attention for DNase
+        gate_dnase = torch.sigmoid(self.U_dnase(h_dnase) + self.c_dnase)
+        attention_dnase = torch.tanh(self.V_dnase(h_dnase) + self.b_dnase)
+        gated_dnase = gate_dnase * attention_dnase  # (batch, d_attn)
+        
+        # Compute attention scores
+        score_dna = torch.matmul(gated_dna, self.W)  # (batch,)
+        score_dnase = torch.matmul(gated_dnase, self.W)  # (batch,)
+        
+        # Stack and apply softmax
+        scores = torch.stack([score_dna, score_dnase], dim=1)  # (batch, 2)
+        attention_weights = F.softmax(scores, dim=1)  # (batch, 2)
+        
+        return attention_weights[:, 0:1], attention_weights[:, 1:2]  # Split back
     
     def forward(self, dna_features: torch.Tensor, dnase_features: torch.Tensor) -> torch.Tensor:
         """
@@ -359,30 +378,56 @@ class FusionLayer(nn.Module):
         """
         
         if self.fusion_type == 'concat':
-            # dHICA approach
-            concatenated = torch.cat([dna_features, dnase_features], dim=1) # concatenate along th channel axis
-            fused = self.projection(concatenated) # project back to baseline channels
-            
+            concatenated = torch.cat([dna_features, dnase_features], dim=1)
+            fused = self.projection(concatenated)
             
         elif self.fusion_type == 'cross_attention':
-            # Cross-attention: DNA attends to DNase
-            dna_trans = dna_features.transpose(1, 2)  # (batch, seq_len, channels)
+            dna_trans = dna_features.transpose(1, 2)
             dnase_trans = dnase_features.transpose(1, 2)
-             # query: dna key and value: DNase
-            attended_dna, _ = self.cross_attention(dna_trans, dnase_trans, dnase_trans) 
-            attended_dna = self.norm(attended_dna + dna_trans)  # residual connection
-            fused = attended_dna.transpose(1, 2)  # Back to conv format
+            attended_dna, _ = self.cross_attention(dna_trans, dnase_trans, dnase_trans)
+            attended_dna = self.norm(attended_dna + dna_trans)
+            fused = attended_dna.transpose(1, 2)
             
         elif self.fusion_type == 'gated':
-            # Gated fusion
             concatenated = torch.cat([dna_features, dnase_features], dim=1)
-            gate = self.gate(concatenated) # compute soft gates
+            gate = self.gate(concatenated)
             fused = gate * dna_features + (1 - gate) * dnase_features
+            
+        elif self.fusion_type == 'mil':
+            # Multiple Instance Learning fusion
+            batch_size, channels, seq_len = dna_features.shape
+            
+            # Mean pool across sequence to get modality representations
+            h_dna = dna_features.mean(dim=2)  # (batch, channels)
+            h_dnase = dnase_features.mean(dim=2)  # (batch, channels)
+            
+            # Compute attention weights
+            alpha_dna, alpha_dnase = self.compute_gated_attention(h_dna, h_dnase)
+            
+            # Store for entropy regularization
+            self.attention_weights = torch.cat([alpha_dna, alpha_dnase], dim=1)
+            
+            # Expand attention weights to match sequence length
+            alpha_dna = alpha_dna.unsqueeze(2).expand(-1, -1, seq_len)  # (batch, 1, seq_len)
+            alpha_dnase = alpha_dnase.unsqueeze(2).expand(-1, -1, seq_len)  # (batch, 1, seq_len)
+            
+            # Weighted combination
+            fused = alpha_dna * dna_features + alpha_dnase * dnase_features
             
         else:
             raise ValueError(f"Unknown fusion_type: {self.fusion_type}")
         
         return fused
+    
+    def get_attention_entropy(self) -> torch.Tensor:
+        """Compute entropy of attention weights for regularization"""
+        if self.attention_weights is None:
+            return torch.tensor(0.0)
+        
+        # Avoid log(0) by adding small epsilon
+        eps = 1e-8
+        entropy = -torch.sum(self.attention_weights * torch.log(self.attention_weights + eps), dim=1)
+        return entropy.mean()
 
 
 class SeparatePathwayModel(nn.Module):
@@ -441,6 +486,12 @@ class SeparatePathwayModel(nn.Module):
         )
         
         self.attention_weights = []
+
+    def get_fusion_entropy(self) -> torch.Tensor:
+        """Get entropy from fusion layer for regularization"""
+        if hasattr(self.fusion, 'get_attention_entropy'):
+            return self.fusion.get_attention_entropy()
+        return torch.tensor(0.0)
     
     def _build_pathway(self, input_channels: int, output_channels: int, 
                       pathway_name: str, pooling_type: str, num_conv_blocks: int):
@@ -624,7 +675,6 @@ class DeepHistoneEnformer:
         
         dna_input, dnase_input = self._separate_inputs(seq_batch, dns_batch)
         
-        # [DEBUG - trying to make dimensions work]
         lab_batch = lab_batch.squeeze() 
         lab_batch = torch.tensor(lab_batch, dtype=torch.float32)
         
@@ -635,14 +685,23 @@ class DeepHistoneEnformer:
         
         # Forward pass
         output = self.forward_fn(dna_input, dnase_input)
-        loss = self.criterion(output, lab_batch)
+        
+        # Main loss
+        main_loss = self.criterion(output, lab_batch)
+        
+        # Add entropy regularization if using MIL fusion
+        total_loss = main_loss
+        if self.forward_fn.fusion_type == 'mil':
+            entropy = self.forward_fn.get_fusion_entropy()
+            entropy_reg = -self.forward_fn.fusion.entropy_lambda * entropy
+            total_loss = main_loss + entropy_reg
         
         # Backward pass
         self.optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         self.optimizer.step()
         
-        return loss.cpu().item()
+        return main_loss.cpu().item()
     
     def eval_on_batch(self, seq_batch: np.ndarray, dns_batch: np.ndarray, lab_batch: np.ndarray) -> Tuple[float, np.ndarray]:
         """Evaluate on a single batch"""
